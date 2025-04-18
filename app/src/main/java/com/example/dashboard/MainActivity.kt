@@ -7,6 +7,8 @@ import android.location.Address
 import android.location.Geocoder
 import android.os.Bundle
 import android.speech.RecognizerIntent
+import android.util.Log
+import android.view.View
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SearchView
@@ -17,32 +19,26 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.LatLng
-import java.io.IOException
-import java.util.Locale
-import com.google.android.gms.location.LocationRequest
-import com.google.android.gms.location.Priority
-import com.example.dashboard.NavigineSdkManager
-import android.util.Log
-import android.view.View
-import com.example.dashboard.NavigineSdkManager.locationListManager
-import com.example.dashboard.NavigineSdkManager.locationManager
+import com.navigine.idl.java.GlobalPoint
 import com.navigine.idl.java.Location
 import com.navigine.idl.java.LocationInfo
-import com.navigine.idl.java.LocationListener
 import com.navigine.idl.java.LocationListListener
 import com.navigine.idl.java.LocationListManager
+import com.navigine.idl.java.LocationListener
 import com.navigine.idl.java.LocationManager
-import com.navigine.idl.java.Sublocation
-import com.navigine.idl.java.Venue
-import kotlin.math.*
-import com.navigine.idl.java.LocationPoint
 import com.navigine.idl.java.NavigineSdk
+import com.navigine.idl.java.Sublocation
+import java.io.IOException
+import java.util.Locale
+import kotlin.math.*
 
 class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -72,8 +68,9 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private var userLongitude: Double = 0.0
     private val TAG = "LocationMatcher"
     private val navigationSdk = NavigineSdk.getInstance()
-    private lateinit var locationListManager: LocationListManager
-    private lateinit var locationManager: LocationManager
+    private val locationListManager by lazy { mNavigineSdk.getLocationListManager() }
+    private val locationManager by lazy { mNavigineSdk.getLocationManager() }
+    private lateinit var mNavigineSdk: NavigineSdk
 
 
 
@@ -113,7 +110,12 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         val mapFragment = supportFragmentManager.findFragmentById(R.id.mapFragment) as SupportMapFragment
         mapFragment.getMapAsync(this)
         // ✅ Initialize Navigine AFTER getting current location
+        // Initialize Navigine SDK
         initializeNavigine()
+
+        // Then initialize managers and setup listeners
+
+
 
         // Initialize location client
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
@@ -256,6 +258,28 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         )
     }
 
+    private fun initializeNavigine() {
+        try {
+            // 1. Initialize SDK (keeping your existing code)
+            NavigineSdkManager.initialize(this)
+
+            // 2. Get instance - correct way based on SDK API
+            mNavigineSdk = NavigineSdk.getInstance() // No arguments needed
+
+            Log.d(TAG, "Navigine SDK initialized successfully")
+
+            // 3. Setup listeners (managers will initialize when first accessed)
+            setupLocationListeners()
+
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initializing Navigine SDK: ${e.message}")
+        }
+    }
+
+
+    private var isNearNavigineLocation = false
+
     private fun getUserLocation() {
         try {
             fusedLocationClient.lastLocation.addOnSuccessListener { location ->
@@ -267,7 +291,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
                     // Move camera to user location
                     googleMap.moveCamera(CameraUpdateFactory.newLatLngZoom(currentLatLng, 15f))
-                    isUserNearAnyLocation(
+                    isNearNavigineLocation=isUserNearAnyLocation(
                         userLat = currentLatLng.latitude,
                         userLng = currentLatLng.longitude
                     )
@@ -280,39 +304,118 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
+    // Define a class to store location data with coordinates
+    private data class LocationData(
+        val locationId: Int,
+        val coordinatePoints: MutableList<CoordinatePoint> = mutableListOf()
+    )
+
+    // Simple class to store coordinate points
+    private data class CoordinatePoint(val latitude: Double, val longitude: Double)
+
+    // Map to store location data keyed by location ID
+    private val locationDataMap = mutableMapOf<Int, LocationData>()
     private val navigineLocations = mutableListOf<LocationInfo>() // Persistent storage
 
-    private fun initializeNavigine() {
+    // Setup function to initialize location listeners
+    fun setupLocationListeners() {
+        // Add listener for location list updates
         locationListManager.addLocationListListener(object : LocationListListener() {
             override fun onLocationListLoaded(locations: HashMap<Int, LocationInfo>) {
                 navigineLocations.clear()
                 navigineLocations.addAll(locations.values)
                 Log.d(TAG, "${locations.size} locations cached")
+
+                // For newly added locations, set up listeners
+                locations.values.forEach { locationInfo ->
+                    if (!locationDataMap.containsKey(locationInfo.getId())) {
+                        // Create entry for this location
+                        locationDataMap[locationInfo.getId()] = LocationData(locationInfo.getId())
+
+                        // Request location details
+                        loadLocationDetails(locationInfo.getId())
+                    }
+                }
             }
 
             override fun onLocationListFailed(error: Error) {
-                navigineLocations.clear() // Reset on failure
+                Log.e(TAG, "Failed to load locations: ${error.message}")
+            }
+        })
+
+        // Add listener for individual location updates
+        locationManager.addLocationListener(object : LocationListener() {
+            override fun onLocationLoaded(location: Location) {
+                // Location was loaded, extract coordinate information
+                val locationId = location.getId() // Assuming Location has getId() method
+                val locationData = locationDataMap[locationId] ?: LocationData(locationId)
+
+                // Clear previous coordinates for this location
+                locationData.coordinatePoints.clear()
+
+                // Get sublocations and their origin points
+                val sublocations = location.getSublocations()
+                sublocations.forEach { sublocation ->
+                    val originPoint = sublocation.getOriginPoint()
+                    locationData.coordinatePoints.add(
+                        CoordinatePoint(originPoint.latitude, originPoint.longitude)
+                    )
+                }
+
+                // Save updated location data
+                locationDataMap[locationId] = locationData
+                Log.d(
+                    TAG,
+                    "Location $locationId loaded with ${locationData.coordinatePoints.size} coordinate points"
+                )
+            }
+
+            override fun onLocationUploaded(p0: Int) {
+                // Handle the upload event if needed
+                // You can leave this empty if you don't need this callback
+            }
+
+            override fun onLocationFailed(p0: Int, error: Error) {
+                Log.e(TAG, "Failed to load location (code $p0): ${error.message}")
             }
         })
     }
 
+    // Function to trigger loading of location details
+    private fun loadLocationDetails(locationId: Int) {
+        // Use the LocationManager to set the location ID, which should trigger the listener
+        locationManager.setLocationId(locationId)
+    }
 
+    // Now our proximity check function can use the stored location data
     fun isUserNearAnyLocation(userLat: Double, userLng: Double): Boolean {
         if (navigineLocations.isEmpty()) {
             Log.w(TAG, "No locations available for matching")
             return false
         }
 
-        return navigineLocations.any { location: LocationInfo ->  // Explicit type
-            abs(location.latitude - userLat) < 0.0018 &&
-                    abs(location.longitude - userLng) < 0.0018 &&
-                    calculateHaversineDistance(
-                        userLat, userLng,
-                        location.latitude,
-                        location.longitude
-                    ) <= 200
+        return navigineLocations.any { locationInfo: LocationInfo ->
+            val locationId = locationInfo.getId()
+            val locationData = locationDataMap[locationId]
+
+            if (locationData != null && locationData.coordinatePoints.isNotEmpty()) {
+                // Check if user is near any coordinate point in this location
+                locationData.coordinatePoints.any { point ->
+                    isPointNearby(userLat, userLng, point.latitude, point.longitude)
+                }
+            } else {
+                // Either location data not loaded yet or no coordinate points
+                false
+            }
         }
     }
+
+    private fun isPointNearby(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Boolean {
+        return abs(lat1 - lat2) < 0.0018 &&
+                abs(lng1 - lng2) < 0.0018 &&
+                calculateHaversineDistance(lat1, lng1, lat2, lng2) <= 200
+    }
+
 
     // Haversine distance calculation
     private fun calculateHaversineDistance(lat1: Double, lon1: Double,
@@ -330,8 +433,6 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
         return R * c
     }
-
-
 
     private fun getAddressFromLocation(latitude: Double, longitude: Double) {
         val geocoder = Geocoder(this, Locale.getDefault())
@@ -364,7 +465,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
             runOnUiThread {
                 locationNameText.text = locationName
-                locationInfoText.text = if (isCanaryConnected) {
+                locationInfoText.text = if (isNearNavigineLocation) {
                     "Within Navigine Location"
                 } else {
                     "Regular Location"

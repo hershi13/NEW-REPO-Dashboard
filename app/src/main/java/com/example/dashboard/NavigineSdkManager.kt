@@ -17,8 +17,8 @@ object NavigineSdkManager {
     private lateinit var mNavigineSdk: NavigineSdk
 
     // SDK components - use lazy initialization to ensure they're created after SDK is initialized
-    var locationListManager: LocationListManager by lazy { mNavigineSdk.getLocationListManager() }
-    var locationManager: LocationManager by lazy { mNavigineSdk.getLocationManager() }
+    val locationListManager: LocationListManager by lazy { mNavigineSdk.getLocationListManager() }
+    val locationManager: LocationManager by lazy { mNavigineSdk.getLocationManager() }
     val navigationManager: NavigationManager by lazy { mNavigineSdk.getNavigationManager(locationManager) }
     val measurementManager: MeasurementManager by lazy { mNavigineSdk.getMeasurementManager(locationManager) }
 
