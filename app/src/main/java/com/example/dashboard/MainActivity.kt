@@ -39,6 +39,11 @@ import com.navigine.idl.java.Sublocation
 import java.io.IOException
 import java.util.Locale
 import kotlin.math.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 
 class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -50,9 +55,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private val locationPermissionRequestCode = 1
     private val recordAudioPermissionRequestCode = 2
-    companion object {
-        private const val TAG = "NavigineSDK"  // Define once per class
-    }
+
+
 
     // UI elements
     private lateinit var searchView: SearchView
@@ -233,6 +237,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
+
+
     private fun startLocationUpdates() {
         if (ActivityCompat.checkSelfPermission(
                 this,
@@ -279,42 +285,29 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
 
     private var isNearNavigineLocation = false
+    // Add loading state check
+    private var isLocationDataReady = false
 
-    private fun getUserLocation() {
-        try {
-            fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-                location?.let {
-                    // 1. Store coordinates
-                    userLatitude = it.latitude
-                    userLongitude = it.longitude
-                    val currentLatLng = LatLng(it.latitude, it.longitude)
-
-                    // Move camera to user location
-                    googleMap.moveCamera(CameraUpdateFactory.newLatLngZoom(currentLatLng, 15f))
-                    isNearNavigineLocation=isUserNearAnyLocation(
-                        userLat = currentLatLng.latitude,
-                        userLng = currentLatLng.longitude
-                    )
-                    // Get address from coordinates
-                    getAddressFromLocation(it.latitude, it.longitude)
-                }
-            }
-        } catch (e: SecurityException) {
-            e.printStackTrace()
-        }
-    }
 
     // Define a class to store location data with coordinates
     private data class LocationData(
         val locationId: Int,
-        val coordinatePoints: MutableList<CoordinatePoint> = mutableListOf()
+        val coordinatePoints: MutableList<CoordinatePoint> = mutableListOf(),
+        val sublocationInfo: MutableList<SublocationData> = mutableListOf()
     )
-
+    private data class SublocationData(
+        val id: Int,
+        val name: String,
+        val originPoint: CoordinatePoint,
+        val venueCount: Int,
+        val zoneCount: Int
+    )
     // Simple class to store coordinate points
     private data class CoordinatePoint(val latitude: Double, val longitude: Double)
 
     // Map to store location data keyed by location ID
-    private val locationDataMap = mutableMapOf<Int, LocationData>()
+    private val locationDataMap = ConcurrentHashMap<Int, LocationData>() // Instead of mutableMapOf
+
     private val navigineLocations = mutableListOf<LocationInfo>() // Persistent storage
 
     // Setup function to initialize location listeners
@@ -350,6 +343,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 val locationId = location.getId() // Assuming Location has getId() method
                 val locationData = locationDataMap[locationId] ?: LocationData(locationId)
 
+
                 // Clear previous coordinates for this location
                 locationData.coordinatePoints.clear()
 
@@ -357,23 +351,75 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 val sublocations = location.getSublocations()
                 sublocations.forEach { sublocation ->
                     val originPoint = sublocation.getOriginPoint()
+                    // Store sublocation info
+                    locationData.sublocationInfo.add(
+                        SublocationData(
+                            id = sublocation.getId(),
+                            name = sublocation.getName() ?: "Unnamed",
+                            originPoint = CoordinatePoint(originPoint.latitude, originPoint.longitude),
+                            venueCount = sublocation.getVenues()?.size ?: 0,
+                            zoneCount = sublocation.getZones()?.size ?: 0
+                        )
+                    )
                     locationData.coordinatePoints.add(
                         CoordinatePoint(originPoint.latitude, originPoint.longitude)
                     )
+
                 }
 
                 // Save updated location data
                 locationDataMap[locationId] = locationData
                 Log.d(
                     TAG,
-                    "Location $locationId loaded with ${locationData.coordinatePoints.size} coordinate points"
+                    "Location $locationId loaded with ${locationData.sublocationInfo}"
                 )
+                // In onLocationLoaded()
+                locationDataMap[locationId] = locationData
+                isLocationDataReady = locationDataMap.size == navigineLocations.size
+                Log.d(TAG, "Data ready: $isLocationDataReady")
+
             }
 
-            override fun onLocationUploaded(p0: Int) {
-                // Handle the upload event if needed
-                // You can leave this empty if you don't need this callback
+            override fun onLocationUploaded(locationId: Int) {
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        val locationInfo = navigineLocations.find { it.getId() == locationId }
+                        val locationName = locationInfo?.getName() ?: "Unknown Location"
+                        val locationData = locationDataMap[locationId] ?: return@launch
+
+                        // Calculate totals
+                        var totalVenues = 0
+                        var totalZones = 0
+                        locationData.sublocationInfo.forEach {
+                            totalVenues += it.venueCount
+                            totalZones += it.zoneCount
+                        }
+
+                        // Log summary
+                        Log.d(TAG, """
+                Location '$locationName' (ID: $locationId) uploaded:
+                ${locationData.sublocationInfo.size} sublocations
+                $totalVenues venues total
+                $totalZones zones total
+            """.trimIndent())
+
+                        // Log details
+                        locationData.sublocationInfo.forEachIndexed { index, subloc ->
+                            Log.d(TAG, """
+                    Sublocation ${index + 1} '${subloc.name}':
+                    - Origin: (${subloc.originPoint.latitude}, ${subloc.originPoint.longitude})
+                    - Venues: ${subloc.venueCount}
+                    - Zones: ${subloc.zoneCount}
+                """.trimIndent())
+                        }
+
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error processing uploaded location $locationId", e)
+                    }
+                }
             }
+
+
 
             override fun onLocationFailed(p0: Int, error: Error) {
                 Log.e(TAG, "Failed to load location (code $p0): ${error.message}")
@@ -388,27 +434,48 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     // Now our proximity check function can use the stored location data
-    fun isUserNearAnyLocation(userLat: Double, userLng: Double): Boolean {
+    private fun isUserNearAnyLocation(userLat: Double, userLng: Double): Boolean {
+        if (!isLocationDataReady) {
+            Log.w(TAG, "Location data not fully loaded")
+            return false
+        }
         if (navigineLocations.isEmpty()) {
             Log.w(TAG, "No locations available for matching")
             return false
         }
 
-        return navigineLocations.any { locationInfo: LocationInfo ->
-            val locationId = locationInfo.getId()
-            val locationData = locationDataMap[locationId]
+        return navigineLocations.any { locationInfo ->
+            locationDataMap[locationInfo.getId()]?.sublocationInfo?.any { sublocation ->
+                // Log each sublocation being checked
+                Log.d(TAG, "Checking against sublocation '${sublocation.name}' " +
+                        "at (${"%.6f".format(sublocation.originPoint.latitude)}, " +
+                        "${"%.6f".format(sublocation.originPoint.longitude)})")
 
-            if (locationData != null && locationData.coordinatePoints.isNotEmpty()) {
-                // Check if user is near any coordinate point in this location
-                locationData.coordinatePoints.any { point ->
-                    isPointNearby(userLat, userLng, point.latitude, point.longitude)
+                val isNearby = isPointNearby(
+                    userLat,
+                    userLng,
+                    sublocation.originPoint.latitude,
+                    sublocation.originPoint.longitude
+                )
+
+                // Log distance calculation
+                if (isNearby) {
+                    val distance = calculateHaversineDistance(
+                        userLat,
+                        userLng,
+                        sublocation.originPoint.latitude,
+                        sublocation.originPoint.longitude
+                    )
+                    Log.d(TAG, "MATCHED: User is ${"%.1f".format(distance)} meters from '${sublocation.name}'")
                 }
-            } else {
-                // Either location data not loaded yet or no coordinate points
-                false
-            }
+
+                isNearby
+            } ?: false
+        }.also { result ->
+            Log.d(TAG, "Proximity check result: ${if (result) "NEAR" else "NOT near"} any location")
         }
     }
+
 
     private fun isPointNearby(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Boolean {
         return abs(lat1 - lat2) < 0.0018 &&
@@ -432,6 +499,30 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         val c = 2 * atan2(sqrt(a), sqrt(1 - a))
 
         return R * c
+    }
+
+    private fun getUserLocation() {
+        try {
+            fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+                location?.let {
+                    // 1. Store coordinates
+                    userLatitude = it.latitude
+                    userLongitude = it.longitude
+                    val currentLatLng = LatLng(it.latitude, it.longitude)
+
+                    // Move camera to user location
+                    googleMap.moveCamera(CameraUpdateFactory.newLatLngZoom(currentLatLng, 15f))
+                    isNearNavigineLocation=isUserNearAnyLocation(
+                        userLat = currentLatLng.latitude,
+                        userLng = currentLatLng.longitude
+                    )
+                    // Get address from coordinates
+                    getAddressFromLocation(it.latitude, it.longitude)
+                }
+            }
+        } catch (e: SecurityException) {
+            e.printStackTrace()
+        }
     }
 
     private fun getAddressFromLocation(latitude: Double, longitude: Double) {
