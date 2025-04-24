@@ -324,6 +324,8 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                     if (!locationDataMap.containsKey(locationInfo.getId())) {
                         // Create entry for this location
                         locationDataMap[locationInfo.getId()] = LocationData(locationInfo.getId())
+                        Log.d(TAG, "Looping location: ${locationInfo.getId()}, name=${locationInfo.getName()}")
+                        Log.d(TAG, "Requesting details for location ID: ${locationInfo.getId()}")
 
                         // Request location details
                         loadLocationDetails(locationInfo.getId())
@@ -346,26 +348,12 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 // Clear previous coordinates for this location
                 locationData.coordinatePoints.clear()
+                locationData.sublocationInfo.clear()
 
-                // Get sublocations and their origin points
-                val sublocations = location.getSublocations()
-                sublocations.forEach { sublocation ->
-                    val originPoint = sublocation.getOriginPoint()
-                    // Store sublocation info
-                    locationData.sublocationInfo.add(
-                        SublocationData(
-                            id = sublocation.getId(),
-                            name = sublocation.getName() ?: "Unnamed",
-                            originPoint = CoordinatePoint(originPoint.latitude, originPoint.longitude),
-                            venueCount = sublocation.getVenues()?.size ?: 0,
-                            zoneCount = sublocation.getZones()?.size ?: 0
-                        )
-                    )
-                    locationData.coordinatePoints.add(
-                        CoordinatePoint(originPoint.latitude, originPoint.longitude)
-                    )
-
-                }
+                // Get sublocations
+                val (parsedSublocations, coordinates) = parseSublocations(location.getSublocations())
+                locationData.sublocationInfo.addAll(parsedSublocations)
+                locationData.coordinatePoints.addAll(coordinates)
 
                 // Save updated location data
                 locationDataMap[locationId] = locationData
@@ -374,9 +362,14 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                     "Location $locationId loaded with ${locationData.sublocationInfo}"
                 )
                 // In onLocationLoaded()
-                locationDataMap[locationId] = locationData
+                //locationDataMap[locationId] = locationData
                 isLocationDataReady = locationDataMap.size == navigineLocations.size
                 Log.d(TAG, "Data ready: $isLocationDataReady")
+                Log.d(TAG, "Total loaded: ${locationDataMap.size} / ${navigineLocations.size}")
+                locationDataMap.forEach { id, data ->
+                    Log.d(TAG, "Location $id: ${data.sublocationInfo.size} sublocations")
+                }
+
 
             }
 
@@ -425,6 +418,32 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 Log.e(TAG, "Failed to load location (code $p0): ${error.message}")
             }
         })
+    }
+    private fun parseSublocations(sublocations: List<Sublocation>): Pair<List<SublocationData>, List<CoordinatePoint>> {
+        val sublocationDataList = mutableListOf<SublocationData>()
+        val coordinatePoints = mutableListOf<CoordinatePoint>()
+
+        sublocations.forEach { sublocation ->
+            val originPoint = sublocation.getOriginPoint()
+            val venueCount = sublocation.getVenues()?.size ?: 0
+            val zoneCount = sublocation.getZones()?.size ?: 0
+
+            Log.d(TAG, "Adding sublocation: ${sublocation.getName()} (venues=$venueCount, zones=$zoneCount)")
+
+            sublocationDataList.add(
+                SublocationData(
+                    id = sublocation.getId(),
+                    name = sublocation.getName() ?: "Unnamed",
+                    originPoint = CoordinatePoint(originPoint.latitude, originPoint.longitude),
+                    venueCount = venueCount,
+                    zoneCount = zoneCount
+                )
+            )
+
+            coordinatePoints.add(CoordinatePoint(originPoint.latitude, originPoint.longitude))
+        }
+
+        return Pair(sublocationDataList, coordinatePoints)
     }
 
     // Function to trigger loading of location details
